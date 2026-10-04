@@ -72,6 +72,13 @@ function plist(el,ps){el.innerHTML='';ps.forEach(p=>{const d=document.createElem
 /* ---- multijogador: WebRTC via PeerJS ---- */
 let peer=null, dc=null, peerReady=false, peerList=new Map();
 const peerjsReady=()=>typeof Peer!=='undefined';
+if(peerjsReady()){
+  $('mk').disabled=false;
+  $('jn').disabled=false;
+  say('Multiplayer pronto!');
+}else{
+  say('Erro ao carregar o multiplayer.');
+}
 
 function peerSend(m){
   if(dc && dc.open) try{dc.send(m)}catch(_){}
@@ -120,9 +127,6 @@ async function signalOpen(c,asHost){
   }
   return true;
 }
-const oldEnter=enter;
-
-const oldEnter=enter;
 async function enter(c,asHost){
   try{
     if(!(await signalOpen(c,asHost)))return false;
