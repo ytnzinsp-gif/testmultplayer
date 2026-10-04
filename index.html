@@ -39,6 +39,7 @@ a.l{display:inline-block;margin-top:10px;color:#8b949e;font-size:13px;cursor:poi
  <div id="p2"><h1>Seu grupo</h1><div class="sub">Passe este código para o amigo entrar</div><div id="code"></div><a class="l" id="cp">Copiar código</a>
   <div id="pl" class="pl"></div><button class="m" id="start">START</button><div class="hint" id="wt"></div><a class="l" id="lv">Sair do grupo</a></div>
 </div></div>
+<script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
 <script>
 const $=i=>document.getElementById(i),cv=$('c'),ctx=cv.getContext('2d');
 const COL=['#e53935','#1e88e5','#43a047','#fb8c00','#8e24aa','#fdd835','#00acc1','#ec407a','#6d4c41','#cfd8dc'];
@@ -68,24 +69,86 @@ const P={x:16,y:16,a:0,mv:0};let RW=0,RH=0,zb,fimg,lastSend=0,t0=0,jid=null,jo=n
 function spawn(){let x,y;do{x=rnd(13,19);y=rnd(13,19)}while(g(x|0,y|0));P.x=x;P.y=y;P.a=rnd(0,6.28)}
 const can=(x,y)=>{const r=.2;return!g((x-r)|0,(y-r)|0)&&!g((x+r)|0,(y-r)|0)&&!g((x-r)|0,(y+r)|0)&&!g((x+r)|0,(y+r)|0)};
 function plist(el,ps){el.innerHTML='';ps.forEach(p=>{const d=document.createElement('div'),i=document.createElement('i'),s=document.createElement('span'),pr=p.presence;i.style.background=/^#[0-9a-f]{6}$/i.test(pr.c)?pr.c:'#888';s.textContent=String(pr.n||'Jogador').slice(0,12)+(p.isMe?' (você)':'')+(pr.host==1?' 👑':'');d.append(i,s);el.appendChild(d)})}
-/* ---- multijogador (capability room) ---- */
-(async()=>{try{roomCap=window.claude&&await window.claude.use('room')}catch(e){roomCap=null}
- if(roomCap){say('');$('mk').disabled=$('jn').disabled=false}else say('Multijogador indisponível aqui. Abra o link do artefato compartilhado (logado) ou teste sozinho.')})();
-const me=()=>({n:($('nm').value.trim()||'Jogador').slice(0,12),c:COL[sel]});
-function genCode(){const a='abcdefghjkmnpqrstuvwxyz23456789';let s='';for(let i=0;i<5;i++)s+=a[Math.random()*a.length|0];return s}
+/* ---- multijogador: WebRTC via PeerJS ---- */
+let peer=null, dc=null, peerReady=false, peerList=new Map();
+const peerjsReady=()=>typeof Peer!=='undefined';
+
+function peerSend(m){
+  if(dc && dc.open) try{dc.send(m)}catch(_){}
+}
+function updateFriend(p){
+  peerList.set('friend',{peer:'friend',isMe:false,presence:p});
+  if(room&&room._onPeers)room._onPeers({peers:room.peers()});
+}
+function wireConn(conn){
+  dc=conn;
+  dc.on('open',()=>{
+    say('Conectado ao amigo!');
+    peerSend({type:'presence',data:{...me(),host,go:host?1:0,x:P.x,y:P.y,a:P.a,m:0}});
+    if(room&&room._onPeers)room._onPeers({peers:room.peers()});
+  });
+  dc.on('data',m=>{
+    try{
+      if(typeof m==='string')m=JSON.parse(m);
+      if(m.type==='presence')updateFriend(m.data);
+      if(m.type==='go'&&!started)begin();
+    }catch(_){}
+  });
+  dc.on('close',()=>{
+    dc=null;peerList.clear();
+    if(room&&room._onPeers)room._onPeers({peers:room.peers()});
+  });
+  dc.on('error',()=>{});
+}
+async function signalOpen(c,asHost){
+  if(!peerjsReady()){say('Biblioteca multiplayer não carregou.');return false}
+  code=c;host=asHost?1:0;
+  const id='arena-'+code.toLowerCase();
+  await new Promise((resolve,reject)=>{
+    peer=new Peer(id);
+    peer.on('open',()=>{peerReady=true;resolve()});
+    peer.on('error',e=>reject(e));
+  });
+  peer.on('connection',conn=>{
+    if(!host)return;
+    if(dc&&dc.open)try{dc.close()}catch(_){}
+    wireConn(conn);
+  });
+  if(!asHost){
+    const conn=peer.connect(id,{reliable:true});
+    wireConn(conn);
+  }
+  return true;
+}
+const oldEnter=enter;
+
+const oldEnter=enter;
 async function enter(c,asHost){
- try{room=await roomCap.join(c)}catch(e){say('Não foi possível entrar nesse grupo.');return false}
- code=c;host=asHost?1:0;await room.presence({...me(),host,go:0});
- room.onPeers(ch=>{if(st=='menu'||st=='lobby')plist($('pl'),ch.peers);if(st=='play')plist($('hl'),ch.peers);
-  if(!started&&ch.peers.some(p=>!p.isMe&&p.presence.host==1&&p.presence.go==1))begin()});
- return true}
-$('mk').onclick=async()=>{$('mk').disabled=true;if(await enter(genCode(),1))lobby();$('mk').disabled=false};
-$('jn').onclick=async()=>{const c=$('cd').value.trim().toLowerCase().replace(/[^a-z0-9]/g,'');if(c.length<4){say('Digite o código do grupo.');return}
- $('jn').disabled=true;say('Procurando grupo…');if(await enter(c,0)){await new Promise(r=>setTimeout(r,2600));
-  if(room.peers().some(p=>!p.isMe&&p.presence.host==1))lobby();else{say('Nenhum grupo encontrado com esse código.');await room.leave();room=null}}$('jn').disabled=false};
+  try{
+    if(!(await signalOpen(c,asHost)))return false;
+    room={
+      presence(d){peerSend({type:'presence',data:d})},
+      peers(){
+        const arr=[{peer:'me',isMe:true,presence:me()}];
+        for(const v of peerList.values())arr.push(v);
+        return arr;
+      },
+      onPeers(fn){room._onPeers=fn}
+    };
+    if(room._onPeers)room._onPeers({peers:room.peers()});
+    return true;
+  }catch(e){
+    if(e&&e.type==='unavailable-id')say('Esse código já está em uso. Escolha outro.');
+    else say('Não foi possível conectar. Tente novamente.');
+    try{if(peer)peer.destroy()}catch(_){}
+    peer=null;dc=null;peerReady=false;
+    return false;
+  }
+}
+
 function lobby(){st='lobby';$('p1').style.display='none';$('p2').style.display='block';$('code').textContent=code.toUpperCase();plist($('pl'),room.peers());
  $('start').style.display=host?'block':'none';$('wt').textContent=host?'Quando todos entrarem, clique em START. Quem entrar depois cai direto no jogo.':'Aguardando o anfitrião (👑) clicar em START…'}
-$('start').onclick=()=>{room.presence({go:1});begin()};
+$('start').onclick=()=>{peerSend({type:'go'});room.presence({go:1});begin()};
 $('cp').onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText(code.toUpperCase()).then(()=>$('cp').textContent='Copiado!')};
 $('lv').onclick=()=>location.reload();$('out').onclick=()=>location.reload();
 $('solo').onclick=()=>{solo=1;begin()};
@@ -104,7 +167,7 @@ function upd(dt,t){
  P.a+=((keys.arrowright||keys.e?1:0)-(keys.arrowleft||keys.q?1:0))*2.4*dt;
  const f=(keys.w||keys.arrowup?1:0)-(keys.s||keys.arrowdown?1:0)-jy,s=(keys.d?1:0)-(keys.a?1:0)+jx,l=Math.hypot(f,s);P.mv=l>.1?1:0;
  if(P.mv){const sp=(keys.shift?5:3.2)*dt/Math.max(l,1),dx=(Math.cos(P.a)*f-Math.sin(P.a)*s)*sp,dy=(Math.sin(P.a)*f+Math.cos(P.a)*s)*sp;if(can(P.x+dx,P.y))P.x+=dx;if(can(P.x,P.y+dy))P.y+=dy}
- if(room&&t-lastSend>45){lastSend=t;room.presence({x:+P.x.toFixed(2),y:+P.y.toFixed(2),a:+P.a.toFixed(2),m:P.mv})}
+ if(room&&t-lastSend>45){lastSend=t;room.presence({n:me().n,c:me().c,host,x:+P.x.toFixed(2),y:+P.y.toFixed(2),a:+P.a.toFixed(2),m:P.mv})}
  if(room){const ps=room.peers(),seen=new Set();ps.forEach(p=>{if(p.isMe)return;const r=p.presence;if(typeof r.x!='number'||typeof r.y!='number')return;seen.add(p.peer);let o=rem.get(p.peer);if(!o){o={x:r.x,y:r.y,ph:0};rem.set(p.peer,o)}
   const k=Math.min(1,dt*14),ox=o.x,oy=o.y;o.x+=(r.x-o.x)*k;o.y+=(r.y-o.y)*k;o.mv=Math.hypot(o.x-ox,o.y-oy)>.002;o.ph+=o.mv?dt*9:0;o.c=/^#[0-9a-f]{6}$/i.test(r.c)?r.c:'#888';o.n=String(r.n||'Jogador').slice(0,12)});
   for(const k of rem.keys())if(!seen.has(k))rem.delete(k)}
